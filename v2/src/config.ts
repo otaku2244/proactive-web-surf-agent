@@ -61,8 +61,9 @@ export async function loadConfig(): Promise<AppConfig> {
     recipientName: process.env.RECIPIENT_NAME ?? "My friend",
     companionPrompt: process.env.COMPANION_PROMPT ?? "You are a curious AI companion with stable interests.",
     deliveryChannel,
-    discoverySources: list("DISCOVERY_SOURCES", "github,hackernews"),
-    discoveryTopics: list("DISCOVERY_TOPICS", "artificial intelligence,developer tools,creative coding"),
+    discoverySources: list("DISCOVERY_SOURCES", "aeon,psyche,archdaily,arxiv"),
+    discoveryTopics: list("DISCOVERY_TOPICS", "cs.CY"),
+    candidateLimit: number("CANDIDATE_LIMIT", 40),
     timezone: process.env.TIMEZONE ?? "Asia/Shanghai",
     dayStartHour: number("DAY_START_HOUR", 9),
     dayEndHour: number("DAY_END_HOUR", 22),
@@ -98,6 +99,9 @@ export async function loadConfig(): Promise<AppConfig> {
   }
   if (config.minIntervalHours <= 0 || config.maxIntervalHours < config.minIntervalHours) {
     throw new Error("MIN_INTERVAL_HOURS and MAX_INTERVAL_HOURS are invalid");
+  }
+  if (config.candidateLimit < 1) {
+    throw new Error("CANDIDATE_LIMIT must be at least 1");
   }
   return config;
 }

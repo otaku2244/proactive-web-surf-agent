@@ -22,7 +22,9 @@ export class SurfApp {
     try {
       const found = await discover(this.config);
       const available = this.state.unseen(found);
-      const candidates = (available.length ? available : found).slice(0, 20);
+      const pool = available.length ? available : found;
+      // 交错取样后各源已均匀分布，这里按配置上限截断即可。
+      const candidates = pool.slice(0, this.config.candidateLimit);
       const selection = await createProvider(this.config).select(candidates);
       const candidate = candidates[selection.index];
       await createDelivery(this.config).send(candidate, selection.message);

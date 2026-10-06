@@ -3,6 +3,8 @@ export interface Candidate {
   title: string;
   url: string;
   summary: string;
+  /** 仅解析阶段使用：发布时间戳，交错取样后剥离，不进提示词。 */
+  _t?: number;
 }
 
 export interface Selection {
@@ -26,6 +28,8 @@ export interface AppConfig {
   deliveryChannel: "console" | "telegram";
   discoverySources: string[];
   discoveryTopics: string[];
+  /** 进模型挑选的候选上限。原实现写死 20，feed 型源一天只出一批时会被吃空。 */
+  candidateLimit: number;
   timezone: string;
   dayStartHour: number;
   dayEndHour: number;
