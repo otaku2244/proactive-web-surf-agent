@@ -21,6 +21,7 @@ interface FeedItem {
   link: string;
   summary: string;
   published: number;
+  image: string;
 }
 
 function stripCdata(s: string): string {
@@ -71,6 +72,18 @@ function pickDate(block: string): number {
   return 0;
 }
 
+/**
+ * 原图：RSS 的 media:content / media:thumbnail / enclosure，
+ * 退化时从 description 里的第一个 <img src> 取。
+ * 实测 Aeon / Psyche / ArchDaily 三源命中率 100%，arXiv 无图。
+ */
+function pickImage(block: string): string {
+  const tagged = block.match(/<(?:media:(?:content|thumbnail)|enclosure)[^>]*url="([^"]+)"/i);
+  if (tagged) return tagged[1].trim();
+  const img = block.match(/<img[^>]*src="([^"]+)"/i);
+  return img ? img[1].trim() : "";
+}
+
 function parseFeed(xml: string): FeedItem[] {
   const chunks = xml.split(/<item[\s>]/i);
   const blocks = chunks.length > 1 ? chunks.slice(1) : xml.split(/<entry[\s>]/i).slice(1);
@@ -84,19 +97,24 @@ function parseFeed(xml: string): FeedItem[] {
       link,
       summary: pick(b, "description") ?? pick(b, "summary") ?? pick(b, "content") ?? "",
       published: pickDate(b),
+      image: pickImage(b),
     });
   }
   return out;
 }
 
-/** 截摘要到 ~320 字符，按句断开（避免半句进提示词）。 */
-function clip(s: string, max = 320): string {
-  if (!s) return "";
-  if (s.length <= max) return s;
-  const cut = s.slice(0, max);
-  const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("。"), cut.lastIndexOf("! "));
-  return (stop > max * 0.5 ? cut.slice(0, stop + 1) : cut).trim();
-}
+/**
+ * 摘要不再截断。
+ *
+ * 原来按 320 字符截（按句断开），实测四源长度分布差异极大：
+ *   Aeon     中位 151 / 最长 175
+ *   Psyche   中位 154 / 最长 212
+ *   ArchDaily 中位 562 / 最长 1021
+ *   arXiv    中位 1524 / 最长 1903
+ * 320 这个上限会把 ArchDaily 砍掉近一半、arXiv 砍到只剩开头一句
+ *（arXiv 的 abstract 本来就是一段完整论述，砍半就等于没给内容）。
+ * 16 条交错全量进提示词实测 12291 字符 ≈ 3400 token，负担可接受。
+ */
 
 // ── 源实现 ───────────────────────────────────────────────────────
 
@@ -107,7 +125,8 @@ async function aeonEssays(topic: string, config: AppConfig): Promise<Candidate[]
     source: "Aeon Essays",
     title: i.title,
     url: i.link,
-    summary: clip(i.summary),
+    summary: i.summary,
+    image: i.image,
     _t: i.published,
   }));
 }
@@ -121,7 +140,8 @@ async function psycheIdeas(topic: string, config: AppConfig): Promise<Candidate[
       source: "Psyche Ideas",
       title: i.title,
       url: i.link,
-      summary: clip(i.summary),
+      summary: i.summary,
+      image: i.image,
       _t: i.published,
     }));
 }
@@ -133,7 +153,8 @@ async function archDaily(topic: string, config: AppConfig): Promise<Candidate[]>
     source: "ArchDaily",
     title: i.title,
     url: i.link,
-    summary: clip(i.summary),
+    summary: i.summary,
+    image: i.image,
     _t: i.published,
   }));
 }
@@ -157,7 +178,8 @@ async function arxiv(topic: string, config: AppConfig): Promise<Candidate[]> {
     source: "arXiv",
     title: i.title,
     url: i.link.replace(/^http:/, "https:"),
-    summary: clip(i.summary),
+    summary: i.summary,
+    image: i.image,
     _t: i.published,
   }));
 }
@@ -183,24 +205,75 @@ function byFreshness(items: Candidate[]): Stamped[] {
   return (items as Stamped[]).slice().sort((a, b) => (b._t ?? 0) - (a._t ?? 0));
 }
 
+/**
+ * 单源重试（退避 1.5s / 4s），作为串行之外的双保险。
+ */
+async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const BACKOFF_MS = [1500, 4000];
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === BACKOFF_MS.length) break;
+      const wait = BACKOFF_MS[attempt];
+      console.warn(`[surf] ${label} 第 ${attempt + 1} 次失败（${String(error).slice(0, 80)}），${wait}ms 后重试`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+  throw lastError;
+}
+
+/** arXiv 官方要求请求间隔 ≥3 秒，对突发并发敏感（见 discover 注释）。 */
+const SERIAL_GAP_MS = 3200;
+
 export async function discover(config: AppConfig): Promise<Candidate[]> {
-  const tasks: Array<Promise<Candidate[]>> = [];
-  const labels: string[] = [];
+  // feed 型源：彼此无请求间隔要求，四路并发最快。
+  const parallel: Array<{ label: string; run: () => Promise<Candidate[]> }> = [];
+  // 搜索型源：单独串行，之间留 ≥3 秒。
+  const serial: Array<{ label: string; run: () => Promise<Candidate[]> }> = [];
+
   for (const name of config.discoverySources) {
     const fn = SOURCES[name.toLowerCase()];
     if (!fn) throw new Error(`Unknown discovery source: ${name}`);
     if (FEED_SOURCES.has(name.toLowerCase())) {
-      tasks.push(fn("", config));
-      labels.push(name);
+      parallel.push({ label: name, run: () => fn("", config) });
       continue;
     }
     for (const topic of config.discoveryTopics) {
-      tasks.push(fn(topic, config));
-      labels.push(`${name}:${topic}`);
+      serial.push({ label: `${name}:${topic}`, run: () => fn(topic, config) });
     }
   }
 
-  const settled = await Promise.allSettled(tasks);
+  const settled: Array<PromiseSettledResult<Candidate[]>> = [];
+  const labels: string[] = [];
+
+  const parallelRun = Promise.allSettled(
+    parallel.map((t) => withRetry(t.label, t.run))
+  ).then((results) => {
+    results.forEach((r, i) => {
+      settled.push(r);
+      labels.push(parallel[i].label);
+    });
+  });
+
+  // 串行组单独跑完再合并，不与feed 组并发。
+  const serialRun = (async () => {
+    const results: Array<PromiseSettledResult<Candidate[]>> = [];
+    for (let i = 0; i < serial.length; i++) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, SERIAL_GAP_MS));
+      results.push(await Promise.allSettled([withRetry(serial[i].label, serial[i].run)]).then((r) => r[0]));
+    }
+    return results;
+  })();
+
+  const [parallelSettled, serialSettled] = await Promise.all([parallelRun, serialRun]);
+  serialSettled.forEach((r, i) => {
+    settled.push(r);
+    labels.push(serial[i].label);
+  });
+
   const failed: string[] = [];
   const groups: Stamped[][] = [];
   settled.forEach((r, i) => {

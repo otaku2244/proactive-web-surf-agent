@@ -51,8 +51,8 @@ export async function loadConfig(): Promise<AppConfig> {
   if (!(["openai-compatible", "anthropic"] as string[]).includes(provider)) {
     throw new Error("MODEL_PROVIDER must be openai-compatible or anthropic");
   }
-  if (!(["console", "telegram"] as string[]).includes(deliveryChannel)) {
-    throw new Error("DELIVERY_CHANNEL must be console or telegram");
+  if (!(["console", "jiwen", "telegram"] as string[]).includes(deliveryChannel)) {
+    throw new Error("DELIVERY_CHANNEL must be console, jiwen or telegram");
   }
 
   const config: AppConfig = {
@@ -63,13 +63,23 @@ export async function loadConfig(): Promise<AppConfig> {
     deliveryChannel,
     discoverySources: list("DISCOVERY_SOURCES", "aeon,psyche,archdaily,arxiv"),
     discoveryTopics: list("DISCOVERY_TOPICS", "cs.CY"),
-    candidateLimit: number("CANDIDATE_LIMIT", 40),
+    candidateLimit: number("CANDIDATE_LIMIT", 16),
+    sereinDbPath: process.env.SEREIN_DB_PATH ?? "",
+    recentLimit: number("RECENT_LIMIT", 5),
+    recentClipChars: number("RECENT_CLIP_CHARS", 400),
+    jiwenBaseUrl: process.env.JIWEN_BASE_URL ?? "http://127.0.0.1:18220",
+    jiwenToken: process.env.JIWEN_TOKEN ?? "",
+    jiwenFindingPath: process.env.JIWEN_FINDING_PATH ?? "/surf/finding",
+    // 与积温判定器一致：默认关思维链。写 0 或 false 视为开。
+    disableThinking: !["0", "false"].includes(
+      String(process.env.LLM_DISABLE_THINKING ?? "true").trim().toLowerCase()
+    ),
     timezone: process.env.TIMEZONE ?? "Asia/Shanghai",
     dayStartHour: number("DAY_START_HOUR", 9),
     dayEndHour: number("DAY_END_HOUR", 22),
     minIntervalHours: number("MIN_INTERVAL_HOURS", 6),
     maxIntervalHours: number("MAX_INTERVAL_HOURS", 12),
-    runOnStart: process.env.RUN_ON_START === "true",
+    autoSchedule: process.env.AUTO_SCHEDULE !== "false",
     stateFile: process.env.STATE_FILE ?? "./data/state.json",
     timeoutMs: number("HTTP_TIMEOUT_MS", 15_000),
     openai: {
@@ -94,6 +104,9 @@ export async function loadConfig(): Promise<AppConfig> {
     required("TELEGRAM_BOT_TOKEN", config.telegram.token);
     required("TELEGRAM_CHAT_ID", config.telegram.chatId);
   }
+  if (deliveryChannel === "jiwen") {
+    required("JIWEN_TOKEN", config.jiwenToken);
+  }
   if (config.dayStartHour < 0 || config.dayEndHour > 24 || config.dayStartHour >= config.dayEndHour) {
     throw new Error("DAY_START_HOUR and DAY_END_HOUR must describe a valid daytime window");
   }
@@ -103,6 +116,10 @@ export async function loadConfig(): Promise<AppConfig> {
   if (config.candidateLimit < 1) {
     throw new Error("CANDIDATE_LIMIT must be at least 1");
   }
+  if (config.recentLimit < 0) {
+    throw new Error("RECENT_LIMIT must be zero or positive");
+  }
+  if (deliveryChannel === "jiwen") required("JIWEN_BASE_URL", config.jiwenBaseUrl);
   return config;
 }
 
